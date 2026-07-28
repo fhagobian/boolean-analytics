@@ -5,11 +5,15 @@ _pool: asyncpg.Pool | None = None
 
 
 async def get_pool() -> asyncpg.Pool:
-    """Devuelve el pool de conexiones, creándolo la primera vez que se pide."""
+    """Devuelve el pool de conexiones, creándolo la primera vez que se pide.
+    statement_cache_size=0 porque el Transaction Pooler de Supabase
+    (pgbouncer) no soporta prepared statements cacheados entre requests."""
     global _pool
     if _pool is None:
         dsn = os.environ["DATABASE_URL"]
-        _pool = await asyncpg.create_pool(dsn=dsn, min_size=1, max_size=5)
+        _pool = await asyncpg.create_pool(
+            dsn=dsn, min_size=1, max_size=5, statement_cache_size=0,
+        )
     return _pool
 
 
