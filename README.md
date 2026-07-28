@@ -1,7 +1,11 @@
 # BOOLEAN Analytics Engine
 
 Servicio Python (FastAPI) que calcula el Bloque A — Radiografía Operativa.
-Se conecta en modo **solo lectura** a la base de Supabase de BOOLEAN.
+Se conecta en modo **solo lectura** a Supabase, vía su **API REST**
+(PostgREST) sobre HTTPS — no usa conexión TCP directa a Postgres, porque
+Railway no permite salida de red por los puertos nativos de base de datos
+(5432/6543). HTTPS (443) sí funciona siempre, es el mismo mecanismo que
+ya usa tu frontend con supabase-js.
 
 ## Endpoints
 - `GET /health` — chequeo de vida, sin autenticación.
@@ -9,39 +13,36 @@ Se conecta en modo **solo lectura** a la base de Supabase de BOOLEAN.
   Requiere header `Authorization: Bearer <API_SECRET>`.
   Query params opcionales: `equipo=TRANS`, `vista_tendencia=semanas|meses`.
 
-## Variables de entorno (ya cargadas en Railway)
-- `DATABASE_URL` — connection string directo de Supabase Postgres.
-- `API_SECRET` — token compartido con el frontend para autorizar requests.
+## Variables de entorno necesarias en Railway
 
-## Deploy en Railway — conectar este código al servicio ya creado
+Andá a Railway → tu servicio → pestaña **Variables** y cargá estas 3:
 
-1. Creá un repositorio nuevo en GitHub (ej: `boolean-analytics`) y subí
-   todo el contenido de esta carpeta:
-   ```powershell
-   git init
-   git add .
-   git commit -m "BOOLEAN Analytics Engine - bloque A"
-   git branch -M main
-   git remote add origin https://github.com/TU_USUARIO/boolean-analytics.git
-   git push -u origin main
-   ```
-2. En Railway, entrá al servicio que ya creaste (el que tiene las
-   variables `DATABASE_URL` y `API_SECRET` cargadas).
-3. Andá a **Settings → Source** → **Connect Repo** → elegí el repo
-   `boolean-analytics` que acabás de subir.
-4. Railway va a detectar el `Procfile` y desplegar automáticamente.
-5. Cuando el deploy diga **Active/Success**, andá a **Settings → Networking**
-   y generá un dominio público (**Generate Domain**). Vas a obtener algo como
-   `boolean-analytics-production.up.railway.app`.
+1. **`SUPABASE_URL`** — la URL base de tu proyecto Supabase, formato:
+   `https://mvavxxhjazwfovjvjnbm.supabase.co`
+   (la sacás de Supabase → Settings → API → "Project URL")
+
+2. **`SUPABASE_SERVICE_KEY`** — la clave `service_role` de Supabase
+   (Supabase → Settings → API → sección "Project API keys" → `service_role`
+   → "Reveal" y copiar). **Es una clave con acceso total a la base — nunca
+   se comparte con el frontend, solo vive acá en Railway.**
+
+3. **`API_SECRET`** — el token que ya tenías cargado, sin cambios (lo usa
+   el frontend para autenticar sus pedidos a este servicio).
+
+La variable vieja `DATABASE_URL` ya no se usa — podés dejarla o borrarla,
+no afecta.
+
+## Deploy en Railway
+Ya está conectado a este repo (`boolean-analytics`, rama `main`). Cada
+`git push` dispara un redeploy automático. Si cambiaste las variables de
+arriba, Railway redeploya solo al guardarlas.
 
 ## Verificación
-Con el dominio generado, probá desde el navegador o `curl`:
 ```
 GET https://TU-DOMINIO.up.railway.app/health
 ```
 Debería responder `{"status":"ok","service":"boolean-analytics"}`.
 
-Para probar el endpoint protegido (reemplazando el token real):
 ```powershell
 curl https://TU-DOMINIO.up.railway.app/radiografia -H "Authorization: Bearer TU_API_SECRET"
 ```
