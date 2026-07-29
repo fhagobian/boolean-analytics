@@ -23,7 +23,11 @@ async def get_client() -> httpx.AsyncClient:
                 "Authorization": f"Bearer {key}",
                 "Content-Type": "application/json",
             },
-            timeout=30.0,
+            # Timeout corto y explícito: si algo de red falla, queremos
+            # que NUESTRA app devuelva el error rápido y con detalle,
+            # en vez de dejar que la plataforma corte con un 502 genérico
+            # después de esperar mucho más tiempo.
+            timeout=httpx.Timeout(connect=8.0, read=15.0, write=8.0, pool=8.0),
         )
     return _client
 
