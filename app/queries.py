@@ -8,7 +8,9 @@ import httpx
 
 CAMPOS_CASO = ("id,tipo_proceso,estado,empresa_id,departamento,localidad,"
                "tecnico_id,prioridad,created_at,updated_at,sla_deadline,"
-               "sla_dias_habiles,historial,numero_serie,razon_social")
+               "sla_dias_habiles,historial,numero_serie,razon_social,"
+               "descripcion,observaciones,"
+               "cierre_descripcion_problema,cierre_como_resolvio")
 
 
 def _dt_iso(d: date, fin_del_dia: bool = False) -> str:

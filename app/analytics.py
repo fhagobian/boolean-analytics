@@ -97,6 +97,10 @@ def _dias_trabajados(casos: list[dict]) -> int:
     return len(pares)
 
 
+def _tecnicos_distintos(casos: list[dict]) -> int:
+    return len({c["tecnico_id"] for c in casos if c.get("tecnico_id")})
+
+
 def kpis_por_proceso(
     cerrados_actual: list[dict],
     cerrados_mes_ant_comp: list[dict],
@@ -115,7 +119,7 @@ def kpis_por_proceso(
             v = _tiempo_resolucion_dias_habiles(c, feriados)
             if v is not None:
                 vals.append(v)
-        return (sum(vals) / len(vals)) if vals else None
+        return (sum(vals) / len(vals)) if vals else None, len(vals)
 
     def pct_primera_visita(casos, tipo=None):
         filtrados = [c for c in casos if not tipo or c.get("tipo_proceso") == tipo]
@@ -126,11 +130,11 @@ def kpis_por_proceso(
 
     resultado = {}
     for tipo in TIPOS_PROCESO:
-        actual = promedio_dias(cerrados_actual, tipo)
-        mes_ant = promedio_dias(cerrados_mes_ant_comp, tipo)
-        mes_ant_cerrado = promedio_dias(cerrados_mes_ant_cerrado, tipo)
-        anio_ant = promedio_dias(cerrados_anio_ant_comp, tipo)
-        anio_ant_cerrado = promedio_dias(cerrados_anio_ant_cerrado, tipo)
+        actual, n_casos_actual = promedio_dias(cerrados_actual, tipo)
+        mes_ant, _ = promedio_dias(cerrados_mes_ant_comp, tipo)
+        mes_ant_cerrado, _ = promedio_dias(cerrados_mes_ant_cerrado, tipo)
+        anio_ant, _ = promedio_dias(cerrados_anio_ant_comp, tipo)
+        anio_ant_cerrado, _ = promedio_dias(cerrados_anio_ant_cerrado, tipo)
 
         simulado_mes = False
         simulado_anio = False
@@ -167,6 +171,7 @@ def kpis_por_proceso(
 
         resultado[tipo] = {
             "tiempo_resolucion_dias": actual,
+            "casos_cerrados": n_casos_actual,
             "vs_mes_anterior_pp": pp_mes,
             "vs_anio_anterior_pp": pp_anio,
             "mes_anterior_simulado": simulado_mes,
@@ -194,6 +199,8 @@ def kpis_por_proceso(
         "casos_tecnico_dia": casos_tecnico_dia,
         "vs_mes_anterior": round(casos_tecnico_dia - ctd_mes_ant, 1) if casos_tecnico_dia and ctd_mes_ant else None,
         "vs_anio_anterior": round(casos_tecnico_dia - ctd_anio_ant, 1) if casos_tecnico_dia and ctd_anio_ant else None,
+        "tecnicos_activos": _tecnicos_distintos(cerrados_actual),
+        "casos_totales": total_cerrados,
     }
     return resultado
 
@@ -350,6 +357,80 @@ def ranking_por_equipo(cerrados_actual: list[dict], tecnicos: list[dict],
 # este mide si se está resolviendo la CAUSA o solo el SÍNTOMA — un patrón
 # de reincidencia suele señalar equipo defectuoso, falta de capacitación
 # del cliente, o diagnóstico apurado en la visita anterior.
+
+
+# ─── 7. Calidad de notas por técnico ────────────────────────────
+# Chequeo heurístico (sin IA, sin costo): evalúa el 100% de los cierres
+# de cada técnico, no una muestra — es igual de rápido y más preciso.
+# Una nota se considera "de calidad" si tiene contenido real, más allá
+# de una frase genérica sin información útil para detectar patrones.
+
+FRASES_BAJA_CALIDAD = {
+    "ok", "sin problemas", "sin problemas detectados", "nada", "listo",
+    "resuelto", "n/a", "na", "-", "sin novedad", "todo bien", "correcto",
+    "solucionado", "ninguno", "ninguna",
+}
+UMBRAL_CHARS_NOTA = 15
+UMBRAL_PCT_NECESITA_MEJORA = 60  # % de notas de calidad por debajo del cual se marca alerta
+
+
+def _nota_de_calidad(caso: dict) -> bool:
+    # La nota real del técnico vive en cierre_descripcion_problema /
+    # cierre_como_resolvio — NO en observaciones/descripcion (esos son
+    # del momento de CREACIÓN del caso, escritos por quien lo abre,
+    # no por el técnico que lo cierra).
+    partes = [
+        (caso.get("cierre_descripcion_problema") or "").strip(),
+        (caso.get("cierre_como_resolvio") or "").strip(),
+    ]
+    texto = " ".join(p for p in partes if p).strip()
+    texto_low = texto.lower()
+
+    if len(texto) < UMBRAL_CHARS_NOTA:
+        return False
+    if texto_low in FRASES_BAJA_CALIDAD:
+        return False
+    # Textos que la propia app genera automáticamente cuando el técnico
+    # NO escribió nada (ej. Instalación exitosa, Retiro sin observación
+    # adicional, Visita sin problemas) — no cuentan como nota real aunque
+    # superen el largo mínimo, porque no las escribió el técnico.
+    if texto_low.startswith("instalación completa con pruebas exitosas"):
+        return False
+    if texto_low.startswith("sin problemas detectados") and "obs:" not in texto_low:
+        return False
+    if texto_low.startswith("retiro completado") and "obs:" not in texto_low:
+        return False
+    return True
+
+
+def calidad_notas_por_tecnico(cerrados_periodo: list[dict], tecnicos: list[dict]) -> list[dict]:
+    por_tecnico = defaultdict(list)
+    for c in cerrados_periodo:
+        tid = c.get("tecnico_id")
+        if tid:
+            por_tecnico[tid].append(c)
+
+    resultado = []
+    for t in tecnicos:
+        tid = t.get("auth_id") or t.get("id")
+        casos_t = por_tecnico.get(tid, [])
+        n = len(casos_t)
+        if n == 0:
+            continue
+        buenas = sum(1 for c in casos_t if _nota_de_calidad(c))
+        pct_calidad = round(100 * buenas / n, 1)
+        resultado.append({
+            "tecnico_id": tid,
+            "nombre": f"{t.get('nombre','')} {t.get('apellido','')}".strip(),
+            "empresa": t.get("empresa_codigo"),
+            "casos_evaluados": n,
+            "pct_notas_de_calidad": pct_calidad,
+            "necesita_mejora": pct_calidad < UMBRAL_PCT_NECESITA_MEJORA,
+        })
+
+    resultado.sort(key=lambda r: r["pct_notas_de_calidad"])
+    return resultado
+
 
 def reincidencia_terminales(casos_ventana: list[dict], hoy: date, dias_ventana: int = 30,
                              umbral: int = 2) -> list[dict]:

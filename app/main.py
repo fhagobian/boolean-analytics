@@ -161,6 +161,7 @@ async def radiografia(
         dias_habiles_90d = dias_habiles_transcurridos(desde_90, hoy, feriados)
         bloque5 = analytics.demanda_por_zona(casos_90d_f, tecnicos_filtrados, meta_por_depto, dias_habiles_90d)
         bloque6 = analytics.reincidencia_terminales(casos_90d_f, hoy)
+        bloque7 = analytics.calidad_notas_por_tecnico(cerrados_actual_f, tecnicos_filtrados)
 
         return {
             "generado_en": datetime.utcnow().isoformat() + "Z",
@@ -173,6 +174,7 @@ async def radiografia(
             "ranking_por_equipo": bloque4,
             "demanda_por_zona": {"ventana_dias": 90, "zonas": bloque5},
             "reincidencia_terminales": {"ventana_dias": 30, "terminales": bloque6},
+            "calidad_notas_tecnico": bloque7,
         }
 
     except httpx.HTTPStatusError as e:
