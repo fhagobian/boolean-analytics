@@ -99,6 +99,55 @@ async def meta_productividad(client: httpx.AsyncClient) -> dict[str, int]:
     return {r["departamento"]: r["meta_casos_dia"] for r in rows}
 
 
+async def casos_con_comentarios(client: httpx.AsyncClient, tipo_proceso: str,
+                                  desde: date, hasta: date) -> list[dict]:
+    """Casos FINALIZADOS de un tipo específico, cerrados en el rango,
+    con los campos de texto necesarios para el análisis de comentarios
+    (motivo de apertura + problema real + cómo se resolvió)."""
+    params = [
+        ("tipo_proceso", f"eq.{tipo_proceso}"),
+        ("estado", "eq.FINALIZADO"),
+        ("updated_at", f"gte.{_dt_iso(desde)}"),
+        ("updated_at", f"lte.{_dt_iso(hasta, True)}"),
+        ("select", "id,descripcion,cierre_descripcion_problema,cierre_como_resolvio"),
+        ("limit", "500"),
+    ]
+    return await _get(client, "/casos", params)
+
+
+async def guardar_analisis_comentarios(client: httpx.AsyncClient, tipo_proceso: str,
+                                         problemas: list[dict], casos_analizados: int) -> None:
+    """Guarda el resultado de una corrida semanal de análisis de
+    comentarios. Única escritura del servicio — a una tabla propia de
+    resultados, nunca a la tabla operativa `casos`."""
+    from datetime import datetime, timezone
+    body = {
+        "tipo_proceso": tipo_proceso,
+        "problemas": problemas,
+        "casos_analizados": casos_analizados,
+        "generado_en": datetime.now(timezone.utc).isoformat(),
+    }
+    r = await client.post("/analisis_comentarios", json=body,
+                           headers={"Prefer": "return=minimal"})
+    r.raise_for_status()
+
+
+async def ultimos_analisis_comentarios(client: httpx.AsyncClient) -> dict[str, dict]:
+    """Trae el análisis más reciente guardado por tipo de proceso."""
+    params = [
+        ("select", "tipo_proceso,problemas,casos_analizados,generado_en"),
+        ("order", "generado_en.desc"),
+        ("limit", "40"),
+    ]
+    rows = await _get(client, "/analisis_comentarios", params)
+    resultado = {}
+    for r in rows:
+        tp = r["tipo_proceso"]
+        if tp not in resultado:  # el primero que aparece es el más reciente (ya viene ordenado)
+            resultado[tp] = r
+    return resultado
+
+
 async def casos_historicos_en_rango(client: httpx.AsyncClient, desde: date, hasta: date) -> list[dict]:
     """Lee de casos_historicos si la tabla existe (se crea cuando se
     cargue el Excel de los 2 años anteriores). Si no existe, devuelve

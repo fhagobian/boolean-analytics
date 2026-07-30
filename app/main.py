@@ -8,7 +8,7 @@ from fastapi import FastAPI, Depends, HTTPException, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
 
-from . import db, queries, analytics
+from . import db, queries, analytics, gemini, scheduler as scheduler_mod
 from .fechas import ventanas_comparables, dias_habiles_transcurridos
 
 logger = logging.getLogger("boolean-analytics")
@@ -17,7 +17,9 @@ logger = logging.getLogger("boolean-analytics")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await db.get_client()
+    sched = scheduler_mod.iniciar_scheduler()
     yield
+    sched.shutdown(wait=False)
     await db.close_client()
 
 
@@ -67,6 +69,17 @@ async def health_supabase():
         return {"status": "error", "detalle": str(e),
                 "supabase_url_configurada": bool(os.environ.get("SUPABASE_URL")),
                 "service_key_configurada": bool(os.environ.get("SUPABASE_SERVICE_KEY"))}
+
+
+@app.post("/analisis-comentarios/ejecutar")
+async def ejecutar_analisis_manual(
+    tipo_proceso: str = Query(..., pattern="^(INSTALACION|SERVICIO_TECNICO|RETIRO|VISITA_PROACTIVA)$"),
+    _auth: bool = Depends(verificar_token),
+):
+    """Dispara el análisis semanal de comentarios manualmente, sin
+    esperar a la corrida automática — útil para probar."""
+    await scheduler_mod.ejecutar_analisis(tipo_proceso)
+    return {"status": "ok", "tipo_proceso": tipo_proceso}
 
 
 @app.get("/radiografia")
@@ -162,6 +175,7 @@ async def radiografia(
         bloque5 = analytics.demanda_por_zona(casos_90d_f, tecnicos_filtrados, meta_por_depto, dias_habiles_90d)
         bloque6 = analytics.reincidencia_terminales(casos_90d_f, hoy)
         bloque7 = analytics.calidad_notas_por_tecnico(cerrados_actual_f, tecnicos_filtrados)
+        bloque8 = await queries.ultimos_analisis_comentarios(client)
 
         return {
             "generado_en": datetime.utcnow().isoformat() + "Z",
@@ -175,6 +189,7 @@ async def radiografia(
             "demanda_por_zona": {"ventana_dias": 90, "zonas": bloque5},
             "reincidencia_terminales": {"ventana_dias": 30, "terminales": bloque6},
             "calidad_notas_tecnico": bloque7,
+            "analisis_comentarios": bloque8,
         }
 
     except httpx.HTTPStatusError as e:
