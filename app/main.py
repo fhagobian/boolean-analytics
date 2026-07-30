@@ -129,24 +129,38 @@ async def radiografia(
         if equipo:
             tecnicos_filtrados = [t for t in tecnicos if t.get("empresa_codigo") == equipo]
             cerrados_actual_f = [c for c in cerrados_actual if c.get("empresa_id") == equipo]
-            cerrados_tendencia = [c for c in cerrados_tendencia if c.get("empresa_id") == equipo]
-            casos_90d = [c for c in casos_90d if c.get("empresa_id") == equipo]
+            cerrados_mes_ant_comp_f = [c for c in cerrados_mes_ant_comp if c.get("empresa_id") == equipo]
+            cerrados_mes_ant_cerrado_f = [c for c in cerrados_mes_ant_cerrado if c.get("empresa_id") == equipo]
+            cerrados_anio_ant_comp_f = [c for c in cerrados_anio_ant_comp if c.get("empresa_id") == equipo]
+            cerrados_anio_ant_cerrado_f = [c for c in cerrados_anio_ant_cerrado if c.get("empresa_id") == equipo]
+            cerrados_tendencia_f = [c for c in cerrados_tendencia if c.get("empresa_id") == equipo]
+            casos_90d_f = [c for c in casos_90d if c.get("empresa_id") == equipo]
         else:
             tecnicos_filtrados = tecnicos
             cerrados_actual_f = cerrados_actual
+            cerrados_mes_ant_comp_f = cerrados_mes_ant_comp
+            cerrados_mes_ant_cerrado_f = cerrados_mes_ant_cerrado
+            cerrados_anio_ant_comp_f = cerrados_anio_ant_comp
+            cerrados_anio_ant_cerrado_f = cerrados_anio_ant_cerrado
+            cerrados_tendencia_f = cerrados_tendencia
+            casos_90d_f = casos_90d
 
         n_tecnicos_activos = sum(1 for t in tecnicos_filtrados if t.get("activo", True))
 
         bloque1 = analytics.kpis_por_proceso(
-            cerrados_actual_f, cerrados_mes_ant_comp, cerrados_mes_ant_cerrado,
-            cerrados_anio_ant_comp, cerrados_anio_ant_cerrado,
+            cerrados_actual_f, cerrados_mes_ant_comp_f, cerrados_mes_ant_cerrado_f,
+            cerrados_anio_ant_comp_f, cerrados_anio_ant_cerrado_f,
             feriados, n_tecnicos_activos, n_habiles_mes,
         )
-        bloque2 = analytics.sla_con_responsables(cerrados_actual, feriados)
-        bloque3 = analytics.tendencia_sla(cerrados_tendencia, hoy, vista_tendencia)
-        bloque4 = analytics.ranking_por_equipo(cerrados_actual, tecnicos, n_habiles_mes)
+        # Bloque 2 (SLA con responsables): si hay un equipo seleccionado, se
+        # calcula SOLO con sus datos — no tiene sentido "culpar" a otros
+        # equipos cuando el usuario ya pidió ver uno en particular.
+        bloque2 = analytics.sla_con_responsables(cerrados_actual_f, feriados)
+        bloque3 = analytics.tendencia_sla(cerrados_tendencia_f, hoy, vista_tendencia)
+        bloque4 = analytics.ranking_por_equipo(cerrados_actual_f, tecnicos_filtrados, n_habiles_mes)
         dias_habiles_90d = dias_habiles_transcurridos(desde_90, hoy, feriados)
-        bloque5 = analytics.demanda_por_zona(casos_90d, tecnicos, meta_por_depto, dias_habiles_90d)
+        bloque5 = analytics.demanda_por_zona(casos_90d_f, tecnicos_filtrados, meta_por_depto, dias_habiles_90d)
+        bloque6 = analytics.reincidencia_terminales(casos_90d_f, hoy)
 
         return {
             "generado_en": datetime.utcnow().isoformat() + "Z",
@@ -158,6 +172,7 @@ async def radiografia(
             "tendencia_sla": {"vista": vista_tendencia, "puntos": bloque3},
             "ranking_por_equipo": bloque4,
             "demanda_por_zona": {"ventana_dias": 90, "zonas": bloque5},
+            "reincidencia_terminales": {"ventana_dias": 30, "terminales": bloque6},
         }
 
     except httpx.HTTPStatusError as e:

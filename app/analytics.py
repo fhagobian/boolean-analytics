@@ -80,6 +80,23 @@ def _df_casos(casos: list[dict]) -> pd.DataFrame:
 
 # ─── 1. KPIs por proceso ──────────────────────────────────────────
 
+def _dias_trabajados(casos: list[dict]) -> int:
+    """Cuenta días-técnico DISTINTOS trabajados: un par (técnico, fecha)
+    cuenta una sola vez, y solo si ese técnico cerró al menos un caso ese
+    día. Si un técnico no cerró ningún caso un día dado, ese día no se le
+    computa — a diferencia de asumir que todos trabajan todos los días
+    hábiles del mes."""
+    pares = set()
+    for c in casos:
+        tid = c.get("tecnico_id")
+        upd = c.get("updated_at")
+        if not tid or not upd:
+            continue
+        d = upd.date() if isinstance(upd, datetime) else upd
+        pares.add((tid, d))
+    return len(pares)
+
+
 def kpis_por_proceso(
     cerrados_actual: list[dict],
     cerrados_mes_ant_comp: list[dict],
@@ -159,25 +176,24 @@ def kpis_por_proceso(
             "sla_objetivo_dias": SLA_DEFAULT.get(tipo),
         }
 
-    # Casos/técnico/día — agregado de todos los procesos, normalizado
+    # Casos/técnico/día — agregado de todos los procesos, usando días-técnico
+    # REALMENTE trabajados como denominador (no días hábiles del calendario
+    # asumiendo asistencia perfecta).
     total_cerrados = len(cerrados_actual)
-    casos_tecnico_dia = None
-    if n_tecnicos_activos > 0 and dias_habiles_transcurridos_mes > 0:
-        casos_tecnico_dia = round(
-            total_cerrados / (n_tecnicos_activos * dias_habiles_transcurridos_mes), 2
-        )
+    dias_trab_actual = _dias_trabajados(cerrados_actual)
+    casos_tecnico_dia = round(total_cerrados / dias_trab_actual, 1) if dias_trab_actual else None
 
     total_mes_ant = len(cerrados_mes_ant_comp) or None
     total_anio_ant = len(cerrados_anio_ant_comp) or None
-    ctd_mes_ant = (round(total_mes_ant / (n_tecnicos_activos * dias_habiles_transcurridos_mes), 2)
-                   if total_mes_ant and n_tecnicos_activos and dias_habiles_transcurridos_mes else None)
-    ctd_anio_ant = (round(total_anio_ant / (n_tecnicos_activos * dias_habiles_transcurridos_mes), 2)
-                    if total_anio_ant and n_tecnicos_activos and dias_habiles_transcurridos_mes else None)
+    dias_trab_mes_ant = _dias_trabajados(cerrados_mes_ant_comp)
+    dias_trab_anio_ant = _dias_trabajados(cerrados_anio_ant_comp)
+    ctd_mes_ant = round(total_mes_ant / dias_trab_mes_ant, 1) if total_mes_ant and dias_trab_mes_ant else None
+    ctd_anio_ant = round(total_anio_ant / dias_trab_anio_ant, 1) if total_anio_ant and dias_trab_anio_ant else None
 
     resultado["_agregado"] = {
         "casos_tecnico_dia": casos_tecnico_dia,
-        "vs_mes_anterior": round(casos_tecnico_dia - ctd_mes_ant, 2) if casos_tecnico_dia and ctd_mes_ant else None,
-        "vs_anio_anterior": round(casos_tecnico_dia - ctd_anio_ant, 2) if casos_tecnico_dia and ctd_anio_ant else None,
+        "vs_mes_anterior": round(casos_tecnico_dia - ctd_mes_ant, 1) if casos_tecnico_dia and ctd_mes_ant else None,
+        "vs_anio_anterior": round(casos_tecnico_dia - ctd_anio_ant, 1) if casos_tecnico_dia and ctd_anio_ant else None,
     }
     return resultado
 
@@ -293,7 +309,8 @@ def ranking_por_equipo(cerrados_actual: list[dict], tecnicos: list[dict],
         tid = t.get("auth_id") or t.get("id")
         casos_t = por_tecnico.get(tid, [])
         n = len(casos_t)
-        casos_dia = round(n / dias_habiles_transcurridos_mes, 2) if dias_habiles_transcurridos_mes else 0
+        dias_trab_t = _dias_trabajados(casos_t)
+        casos_dia = round(n / dias_trab_t, 1) if dias_trab_t else 0
         primera_visita = (
             round(100 * sum(1 for c in casos_t if _resuelto_primera_visita(c.get("historial"))) / n, 1)
             if n else 0
@@ -323,6 +340,57 @@ def ranking_por_equipo(cerrados_actual: list[dict], tecnicos: list[dict],
         lista.sort(key=lambda t: -t["score"])
         resultado[equipo] = lista
     return resultado
+
+
+
+# ─── 6. Reincidencia por terminal ───────────────────────────────
+# Indicador líder (no de tiempo/SLA como los anteriores): detecta
+# terminales que generan múltiples Servicios Técnicos en poco tiempo.
+# A diferencia de los bloques 1-5 (que miden qué tan rápido se resuelve),
+# este mide si se está resolviendo la CAUSA o solo el SÍNTOMA — un patrón
+# de reincidencia suele señalar equipo defectuoso, falta de capacitación
+# del cliente, o diagnóstico apurado en la visita anterior.
+
+def reincidencia_terminales(casos_ventana: list[dict], hoy: date, dias_ventana: int = 30,
+                             umbral: int = 2) -> list[dict]:
+    """casos_ventana: casos de SERVICIO_TECNICO creados en los últimos
+    `dias_ventana` días (típicamente un subconjunto de los últimos 90 días
+    ya traídos para el bloque 5, filtrado acá mismo). umbral: cantidad
+    mínima de ST para considerarse reincidente (default 2 = "2 o más")."""
+    desde = date.fromordinal(hoy.toordinal() - dias_ventana)
+    por_terminal = defaultdict(list)
+
+    for c in casos_ventana:
+        if c.get("tipo_proceso") != "SERVICIO_TECNICO":
+            continue
+        serie = c.get("numero_serie")
+        if not serie:
+            continue
+        creado = c.get("created_at")
+        fecha_creado = creado.date() if isinstance(creado, datetime) else creado
+        if fecha_creado is None or fecha_creado < desde:
+            continue
+        por_terminal[serie].append(c)
+
+    resultado = []
+    for serie, casos in por_terminal.items():
+        if len(casos) < umbral:
+            continue
+        casos_ordenados = sorted(casos, key=lambda c: c.get("created_at") or datetime.min)
+        ultimo = casos_ordenados[-1]
+        resultado.append({
+            "numero_serie": serie,
+            "razon_social": ultimo.get("razon_social") or "Sin nombre",
+            "empresa": ultimo.get("empresa_id"),
+            "cantidad_st": len(casos),
+            "fechas": [
+                (c["created_at"].date() if isinstance(c.get("created_at"), datetime) else c.get("created_at")).isoformat()
+                for c in casos_ordenados if c.get("created_at")
+            ],
+        })
+
+    resultado.sort(key=lambda r: -r["cantidad_st"])
+    return resultado[:20]
 
 
 # ─── 5. Demanda por zona × tipo de proceso (90 días) ───────────────
