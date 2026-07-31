@@ -1,14 +1,15 @@
 import os
 import asyncio
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Depends, HTTPException, Header, Query
+from fastapi import FastAPI, Depends, HTTPException, Header, Query, Request
+from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
 
-from . import db, queries, analytics, gemini, scheduler as scheduler_mod
+from . import db, queries, analytics, gemini, proactivo, nps, scheduler as scheduler_mod
 from .fechas import ventanas_comparables, dias_habiles_transcurridos
 
 logger = logging.getLogger("boolean-analytics")
@@ -80,6 +81,138 @@ async def ejecutar_analisis_manual(
     esperar a la corrida automática — útil para probar."""
     await scheduler_mod.ejecutar_analisis(tipo_proceso)
     return {"status": "ok", "tipo_proceso": tipo_proceso}
+
+
+@app.get("/alertas")
+async def alertas(
+    _auth: bool = Depends(verificar_token),
+    equipo: str | None = Query(default=None, description="Filtrar por código de equipo (Regional)"),
+):
+    """Bloque B — Análisis Proactivo. Corre a demanda (el frontend lo
+    consulta al abrir la pestaña, y también una vez al día para el
+    resumen del ticker). Liviano — solo aritmética sobre datos ya
+    existentes, sin costo de IA."""
+    try:
+        client = await db.get_client()
+        hoy = date.today()
+
+        # 7 semanas de casos cerrados (6 de referencia + la actual)
+        cerrados_7sem, tecnicos, creados_14d, cerrados_30d = await asyncio.gather(
+            queries.casos_cerrados_en_rango(client, hoy - timedelta(weeks=7), hoy),
+            queries.usuarios_tecnicos(client),
+            queries.casos_en_rango(client, hoy - timedelta(days=14), hoy),
+            queries.casos_cerrados_en_rango(client, hoy - timedelta(days=30), hoy),
+        )
+
+        if equipo:
+            tecnicos = [t for t in tecnicos if t.get("empresa_codigo") == equipo]
+            cerrados_7sem = [c for c in cerrados_7sem if c.get("empresa_id") == equipo]
+            cerrados_30d = [c for c in cerrados_30d if c.get("empresa_id") == equipo]
+            # B2 (clusters) es geográfico, no tiene dueño de equipo — se
+            # deja sin filtrar y se oculta en el resumen para Regional
+
+        b1 = proactivo.desvio_individual(cerrados_7sem, tecnicos, hoy)
+        b2 = proactivo.clusters_geograficos(creados_14d, hoy)
+        b3 = proactivo.casos_outlier(cerrados_30d)
+        resumen_ticker = proactivo.resumen_para_ticker(b1, b2, b3, equipo=equipo)
+
+        return {
+            "generado_en": datetime.utcnow().isoformat() + "Z",
+            "desvio_individual": b1,
+            "clusters_geograficos": b2 if not equipo else [],
+            "casos_outlier": b3,
+            "resumen_ticker": resumen_ticker,
+        }
+    except Exception as e:
+        logger.exception("Error calculando alertas del Bloque B")
+        raise HTTPException(500, f"Error interno: {e}")
+
+
+class EnviarNPSBody(BaseModel):
+    caso_id: str
+    tecnico_id: str
+    telefono: str
+
+
+@app.post("/encuestas-nps/enviar")
+async def encuestas_nps_enviar(body: EnviarNPSBody, _auth: bool = Depends(verificar_token)):
+    """Llamado por el frontend cuando el técnico carga un teléfono al
+    finalizar un caso exitoso (dentro del muestreo del Director).
+    Valida antifraude, manda el WhatsApp, y registra el intento."""
+    client = await db.get_client()
+    telefono = nps.normalizar_telefono(body.telefono)
+
+    # Leer ventana antifraude configurada (default 60 días si no hay fila)
+    dias_ventana = 60
+    try:
+        r = await client.get("/config_encuestas_nps", params=[("select", "dias_antifraude_mismo_telefono"), ("limit", "1")])
+        cfg = r.json()
+        if cfg:
+            dias_ventana = cfg[0].get("dias_antifraude_mismo_telefono") or 60
+    except Exception:
+        pass
+
+    if await nps.telefono_bloqueado_antifraude(client, telefono, dias_ventana):
+        await client.post("/encuestas_nps", json={
+            "caso_id": body.caso_id, "tecnico_id": body.tecnico_id,
+            "telefono": telefono, "estado": "bloqueada_antifraude",
+        }, headers={"Prefer": "return=minimal"})
+        raise HTTPException(409, "Este número ya recibió una encuesta recientemente — no se puede reutilizar.")
+
+    try:
+        resultado = await nps.enviar_whatsapp(client, telefono, nps.texto_encuesta_inicial())
+        await client.post("/encuestas_nps", json={
+            "caso_id": body.caso_id, "tecnico_id": body.tecnico_id,
+            "telefono": telefono, "estado": "enviada",
+            "twilio_sid_enviado": resultado.get("sid"),
+            "enviada_at": datetime.utcnow().isoformat() + "Z",
+        }, headers={"Prefer": "return=minimal"})
+        return {"status": "ok", "telefono": telefono}
+    except Exception as e:
+        logger.exception("Error enviando encuesta NPS por WhatsApp")
+        await client.post("/encuestas_nps", json={
+            "caso_id": body.caso_id, "tecnico_id": body.tecnico_id,
+            "telefono": telefono, "estado": "error", "error_detalle": str(e),
+        }, headers={"Prefer": "return=minimal"})
+        raise HTTPException(502, f"No se pudo enviar el WhatsApp: {e}")
+
+
+@app.post("/webhooks/twilio-whatsapp")
+async def webhook_twilio_whatsapp(request: Request):
+    """Endpoint PÚBLICO — Twilio manda acá la respuesta del cliente.
+    No usa el token Bearer normal (Twilio no lo conoce); en cambio se
+    valida la firma X-Twilio-Signature con el Auth Token, para
+    asegurarnos de que el POST realmente vino de Twilio."""
+    form = await request.form()
+    params = dict(form)
+    firma = request.headers.get("X-Twilio-Signature", "")
+    url_completa = str(request.url)
+
+    if not nps.validar_firma_twilio(url_completa, params, firma):
+        raise HTTPException(403, "Firma inválida")
+
+    from_whatsapp = params.get("From", "").replace("whatsapp:", "")
+    body_texto = params.get("Body", "")
+    puntaje, comentario = nps.parsear_respuesta(body_texto)
+
+    client = await db.get_client()
+    r = await client.get("/encuestas_nps", params=[
+        ("telefono", f"eq.{from_whatsapp}"),
+        ("estado", "eq.enviada"),
+        ("select", "id"),
+        ("order", "enviada_at.desc"),
+        ("limit", "1"),
+    ])
+    pendientes = r.json()
+    if pendientes:
+        encuesta_id = pendientes[0]["id"]
+        await client.patch(f"/encuestas_nps?id=eq.{encuesta_id}", json={
+            "estado": "respondida", "puntaje": puntaje, "comentario": comentario,
+            "twilio_sid_respuesta": params.get("MessageSid"),
+            "respondida_at": datetime.utcnow().isoformat() + "Z",
+        }, headers={"Prefer": "return=minimal"})
+
+    return {"status": "ok"}  # Twilio espera 200, no le importa el body
 
 
 @app.get("/radiografia")
