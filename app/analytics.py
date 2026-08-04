@@ -476,6 +476,86 @@ def reincidencia_terminales(casos_ventana: list[dict], hoy: date, dias_ventana: 
 
 # ─── 5. Demanda por zona × tipo de proceso (90 días) ───────────────
 
+# ─── Análisis de tendencia histórica real (base de Bloque C) ────
+# No es Prophet todavía (eso es la Fase 2 completa) — es una
+# tendencia lineal simple sobre los meses reales cargados. Con
+# suficiente historia real, ya es información genuina y accionable,
+# no un placeholder vacío.
+
+def _regresion_lineal_simple(valores: list[float]) -> tuple[float, float]:
+    """Devuelve (pendiente, intercepto) de la recta que mejor ajusta
+    los valores, indexados 0..n-1 en el eje X."""
+    n = len(valores)
+    if n < 2:
+        return 0.0, (valores[0] if valores else 0.0)
+    xs = list(range(n))
+    x_prom = sum(xs) / n
+    y_prom = sum(valores) / n
+    num = sum((xs[i]-x_prom)*(valores[i]-y_prom) for i in range(n))
+    den = sum((xs[i]-x_prom)**2 for i in range(n))
+    pendiente = num/den if den else 0.0
+    intercepto = y_prom - pendiente*x_prom
+    return pendiente, intercepto
+
+
+def tendencia_historica_mensual(todos_los_casos: list[dict], meses_atras: int = 12) -> dict:
+    from collections import defaultdict as dd
+    por_mes = dd(list)
+    for c in todos_los_casos:
+        creado = c.get("created_at")
+        if not creado:
+            continue
+        clave = (creado.year, creado.month)
+        por_mes[clave].append(c)
+
+    claves_ordenadas = sorted(por_mes.keys())[-meses_atras:]
+    if len(claves_ordenadas) < 2:
+        return {"disponible": False, "confianza": "baja",
+                "motivo": "Menos de 2 meses de historia cargada"}
+
+    puntos = []
+    for (y, m) in claves_ordenadas:
+        casos_mes = por_mes[(y, m)]
+        total = len(casos_mes)
+        cerrados = [c for c in casos_mes if c.get("estado")=="FINALIZADO"]
+        sla_ok = sum(1 for c in cerrados if _sla_cumplido(c))
+        sla_pct = round(100*sla_ok/len(cerrados),1) if cerrados else None
+        puntos.append({"anio":y,"mes":m,"total":total,"sla_pct":sla_pct})
+
+    volumenes = [p["total"] for p in puntos]
+    slas = [p["sla_pct"] for p in puntos if p["sla_pct"] is not None]
+
+    pend_vol, inter_vol = _regresion_lineal_simple(volumenes)
+    n = len(volumenes)
+    proyeccion_prox_mes = max(round(pend_vol*n + inter_vol), 0)
+    promedio_ult3 = round(sum(volumenes[-3:])/min(3,len(volumenes)))
+    # Proyección final: promedio de la extrapolación lineal y el promedio
+    # reciente — más estable que solo una de las dos
+    proyeccion_final = round((proyeccion_prox_mes + promedio_ult3)/2)
+
+    tendencia_vol = "creciente" if pend_vol > 2 else "decreciente" if pend_vol < -2 else "estable"
+
+    pend_sla, _ = _regresion_lineal_simple(slas) if len(slas)>=2 else (0,0)
+    tendencia_sla_txt = "mejorando" if pend_sla > 0.3 else "empeorando" if pend_sla < -0.3 else "estable"
+
+    # Confianza honesta según cantidad de meses reales disponibles
+    if n >= 12: confianza = "alta"
+    elif n >= 6: confianza = "media"
+    else: confianza = "baja"
+
+    return {
+        "disponible": True,
+        "meses_analizados": n,
+        "puntos": puntos,
+        "tendencia_volumen": tendencia_vol,
+        "proyeccion_proximo_mes": proyeccion_final,
+        "tendencia_sla": tendencia_sla_txt,
+        "sla_actual": slas[-1] if slas else None,
+        "sla_hace_n_meses": slas[0] if slas else None,
+        "confianza": confianza,
+    }
+
+
 def demanda_por_zona(
     casos_90d: list[dict], tecnicos: list[dict], meta_por_depto: dict[str, int],
     dias_habiles_90d: int,

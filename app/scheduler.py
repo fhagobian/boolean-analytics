@@ -23,13 +23,13 @@ CRONOGRAMA = {
 }
 
 
-async def ejecutar_analisis(tipo_proceso: str):
-    logger.info(f"Iniciando análisis semanal de comentarios: {tipo_proceso}")
+async def ejecutar_analisis(tipo_proceso: str, desde: date = None, hasta: date = None):
+    logger.info(f"Iniciando análisis de comentarios: {tipo_proceso} ({desde} a {hasta})")
     try:
         client = await db.get_client()
-        hoy = date.today()
-        desde = hoy - timedelta(days=7)
-        casos = await queries.casos_con_comentarios(client, tipo_proceso, desde, hoy)
+        hoy = hasta or date.today()
+        desde_final = desde or (hoy - timedelta(days=7))
+        casos = await queries.casos_con_comentarios(client, tipo_proceso, desde_final, hoy)
         resultado = await gemini.analizar_comentarios(client, tipo_proceso, casos)
         await queries.guardar_analisis_comentarios(
             client, tipo_proceso, resultado.get("problemas", []), len(casos)

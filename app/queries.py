@@ -35,11 +35,41 @@ def _parse_fila_caso(row: dict) -> dict:
 
 
 async def _get(client: httpx.AsyncClient, path: str, params: list[tuple[str, str]]) -> list[dict]:
-    r = await client.get(path, params=params)
-    if r.status_code == 404:
-        return []  # tabla no existe todavía (ej. casos_historicos, config_productividad)
-    r.raise_for_status()
-    return r.json()
+    """Trae resultados de PostgREST. Si el llamador pidió un `limit` chico
+    (<1000, ej. chequeos puntuales), se respeta tal cual. Si no hay límite
+    o es grande (se pidió "traer todo"), se pagina de verdad — sigue
+    pidiendo páginas hasta recibir un resultado vacío, sin importar qué
+    tope de filas tenga configurado el proyecto de Supabase (Settings →
+    API → Max Rows). Esto evita que una consulta se trunque en silencio
+    cuando el volumen de datos supera ese tope."""
+    limit_pedido = None
+    for k, v in params:
+        if k == "limit":
+            limit_pedido = int(v)
+
+    if limit_pedido is not None and limit_pedido < 1000:
+        r = await client.get(path, params=params)
+        if r.status_code == 404:
+            return []
+        r.raise_for_status()
+        return r.json()
+
+    resultados = []
+    offset = 0
+    tam_pagina = 1000
+    while True:
+        pag_params = [(k, v) for k, v in params if k not in ("limit", "offset")]
+        pag_params += [("limit", str(tam_pagina)), ("offset", str(offset))]
+        r = await client.get(path, params=pag_params)
+        if r.status_code == 404:
+            return resultados
+        r.raise_for_status()
+        pagina = r.json()
+        if not pagina:
+            break
+        resultados.extend(pagina)
+        offset += len(pagina)
+    return resultados
 
 
 async def traer_feriados(client: httpx.AsyncClient) -> set[date]:

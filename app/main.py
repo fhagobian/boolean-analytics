@@ -75,12 +75,16 @@ async def health_supabase():
 @app.post("/analisis-comentarios/ejecutar")
 async def ejecutar_analisis_manual(
     tipo_proceso: str = Query(..., pattern="^(INSTALACION|SERVICIO_TECNICO|RETIRO|VISITA_PROACTIVA)$"),
+    desde: date | None = Query(default=None, description="Opcional — analiza esta ventana en vez de 'últimos 7 días desde hoy'"),
+    hasta: date | None = Query(default=None),
     _auth: bool = Depends(verificar_token),
 ):
-    """Dispara el análisis semanal de comentarios manualmente, sin
-    esperar a la corrida automática — útil para probar."""
-    await scheduler_mod.ejecutar_analisis(tipo_proceso)
-    return {"status": "ok", "tipo_proceso": tipo_proceso}
+    """Dispara el análisis de comentarios manualmente. Sin desde/hasta,
+    analiza los últimos 7 días desde hoy (igual que el cron automático).
+    Con desde/hasta, analiza esa ventana específica — útil para correr
+    el análisis sobre una semana real ya ocurrida en vez de esperar."""
+    await scheduler_mod.ejecutar_analisis(tipo_proceso, desde, hasta)
+    return {"status": "ok", "tipo_proceso": tipo_proceso, "desde": str(desde), "hasta": str(hasta)}
 
 
 @app.get("/alertas")
@@ -310,6 +314,14 @@ async def radiografia(
         bloque7 = analytics.calidad_notas_por_tecnico(cerrados_actual_f, tecnicos_filtrados)
         bloque8 = await queries.ultimos_analisis_comentarios(client)
 
+        # ── Bloque C fase 1: tendencia histórica real (no Prophet aún,
+        # pero ya no es un placeholder — usa los meses reales cargados) ──
+        desde_tendencia_larga = date.fromordinal(hoy.toordinal() - 400)  # ~13 meses
+        casos_para_tendencia = await queries.casos_en_rango(client, desde_tendencia_larga, hoy)
+        if equipo:
+            casos_para_tendencia = [c for c in casos_para_tendencia if c.get("empresa_id")==equipo]
+        bloque_prediccion = analytics.tendencia_historica_mensual(casos_para_tendencia, meses_atras=12)
+
         return {
             "generado_en": datetime.utcnow().isoformat() + "Z",
             "ventana_actual": {"desde": ventanas["actual"]["desde"].isoformat(),
@@ -323,6 +335,7 @@ async def radiografia(
             "reincidencia_terminales": {"ventana_dias": 30, "terminales": bloque6},
             "calidad_notas_tecnico": bloque7,
             "analisis_comentarios": bloque8,
+            "tendencia_historica": bloque_prediccion,
         }
 
     except httpx.HTTPStatusError as e:
