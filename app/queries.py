@@ -178,6 +178,13 @@ async def ultimos_analisis_comentarios(client: httpx.AsyncClient) -> dict[str, d
     return resultado
 
 
+
+async def calendario_eventos(client: httpx.AsyncClient) -> list[dict]:
+    """Eventos comerciales activos — se usan como 'holidays' de Prophet."""
+    params = [("activo", "eq.true"), ("select", "nombre,fecha,dias_influencia_antes,dias_influencia_despues")]
+    return await _get(client, "/calendario_eventos", params)
+
+
 async def casos_historicos_en_rango(client: httpx.AsyncClient, desde: date, hasta: date) -> list[dict]:
     """Lee de casos_historicos si la tabla existe (se crea cuando se
     cargue el Excel de los 2 años anteriores). Si no existe, devuelve

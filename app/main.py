@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
 
-from . import db, queries, analytics, gemini, proactivo, nps, scheduler as scheduler_mod
+from . import db, queries, analytics, gemini, proactivo, nps, prophet_forecast, scheduler as scheduler_mod
 from .fechas import ventanas_comparables, dias_habiles_transcurridos
 
 logger = logging.getLogger("boolean-analytics")
@@ -217,6 +217,38 @@ async def webhook_twilio_whatsapp(request: Request):
         }, headers={"Prefer": "return=minimal"})
 
     return {"status": "ok"}  # Twilio espera 200, no le importa el body
+
+
+@app.get("/prediccion")
+async def prediccion(
+    _auth: bool = Depends(verificar_token),
+    equipo: str | None = Query(default=None),
+    horizonte_semanas: int = Query(default=8, ge=1, le=26),
+):
+    """Bloque C, Fase 2 — proyección real con Prophet. Un modelo por
+    tipo de proceso + uno agregado, usando el calendario de eventos
+    comerciales como señal de estacionalidad."""
+    try:
+        client = await db.get_client()
+        hoy = date.today()
+        desde = date.fromordinal(hoy.toordinal() - 600)  # cubre toda la historia cargada
+
+        casos, eventos = await asyncio.gather(
+            queries.casos_en_rango(client, desde, hoy),
+            queries.calendario_eventos(client),
+        )
+        if equipo:
+            casos = [c for c in casos if c.get("empresa_id") == equipo]
+
+        resultado = prophet_forecast.pronosticar(casos, eventos, horizonte_semanas)
+        return {
+            "generado_en": datetime.utcnow().isoformat() + "Z",
+            "horizonte_semanas": horizonte_semanas,
+            "forecast": resultado,
+        }
+    except Exception as e:
+        logger.exception("Error calculando predicción con Prophet")
+        raise HTTPException(500, f"Error interno: {e}")
 
 
 @app.get("/radiografia")
