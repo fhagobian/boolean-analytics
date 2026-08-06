@@ -223,7 +223,7 @@ async def webhook_twilio_whatsapp(request: Request):
 async def prediccion(
     _auth: bool = Depends(verificar_token),
     equipo: str | None = Query(default=None),
-    horizonte_semanas: int = Query(default=8, ge=1, le=26),
+    horizonte_semanas: int = Query(default=6, ge=1, le=26),
 ):
     """Bloque C, Fase 2 — proyección real con Prophet. Un modelo por
     tipo de proceso + uno agregado, usando el calendario de eventos

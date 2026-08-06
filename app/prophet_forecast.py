@@ -16,8 +16,10 @@ import pandas as pd
 
 warnings.filterwarnings("ignore")  # Prophet es ruidoso con warnings de cmdstanpy, no son errores
 
+from .zonas import zona_de_caso
+
 TIPOS_PROCESO = ["INSTALACION", "SERVICIO_TECNICO", "RETIRO", "VISITA_PROACTIVA"]
-HORIZONTE_SEMANAS_DEFAULT = 8
+HORIZONTE_SEMANAS_DEFAULT = 6
 SEMANAS_HISTORICO_MINIMAS = 8  # menos que esto, ni se intenta ajustar Prophet
 
 
@@ -113,20 +115,32 @@ def _ajustar_y_proyectar(serie: pd.DataFrame, holidays: pd.DataFrame | None,
 
 def pronosticar(todos_los_casos: list[dict], eventos: list[dict],
                  horizonte_semanas: int = HORIZONTE_SEMANAS_DEFAULT) -> dict:
-    """Devuelve el forecast por cada tipo de proceso + el total agregado."""
+    """Devuelve el forecast por tipo de proceso + total agregado + por
+    zona operativa — el alcance completo pedido ('todo')."""
     holidays = _armar_holidays(eventos)
-    resultado = {}
+    por_proceso = {}
 
-    # Total agregado
     serie_total = _armar_serie_semanal(todos_los_casos)
     r_total = _ajustar_y_proyectar(serie_total, holidays, horizonte_semanas)
-    resultado["TOTAL"] = r_total or {"disponible": False, "motivo": "Historia insuficiente"}
+    por_proceso["TOTAL"] = r_total or {"disponible": False, "motivo": "Historia insuficiente"}
 
-    # Por tipo de proceso
     for tipo in TIPOS_PROCESO:
         casos_tipo = [c for c in todos_los_casos if c.get("tipo_proceso") == tipo]
         serie = _armar_serie_semanal(casos_tipo)
         r = _ajustar_y_proyectar(serie, holidays, horizonte_semanas)
-        resultado[tipo] = r or {"disponible": False, "motivo": "Historia insuficiente para este proceso"}
+        por_proceso[tipo] = r or {"disponible": False, "motivo": "Historia insuficiente para este proceso"}
 
-    return resultado
+    # ── Por zona operativa ──
+    por_zona_casos = defaultdict(list)
+    for c in todos_los_casos:
+        zona = zona_de_caso(c.get("departamento"), c.get("localidad"))
+        por_zona_casos[zona].append(c)
+
+    por_zona = {}
+    for zona, casos_zona in por_zona_casos.items():
+        serie = _armar_serie_semanal(casos_zona)
+        r = _ajustar_y_proyectar(serie, holidays, horizonte_semanas)
+        if r:  # solo incluir zonas con historia suficiente — no listar 20 zonas vacías
+            por_zona[zona] = r
+
+    return {"por_proceso": por_proceso, "por_zona": por_zona}
