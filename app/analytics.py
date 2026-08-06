@@ -556,6 +556,9 @@ def tendencia_historica_mensual(todos_los_casos: list[dict], meses_atras: int = 
     }
 
 
+TIPOS_PROCESO_VALIDOS = {"INSTALACION", "SERVICIO_TECNICO", "RETIRO", "VISITA_PROACTIVA"}
+
+
 def demanda_por_zona(
     casos_90d: list[dict], tecnicos: list[dict], meta_por_depto: dict[str, int],
     dias_habiles_90d: int,
@@ -563,7 +566,11 @@ def demanda_por_zona(
     por_zona = defaultdict(lambda: defaultdict(int))
     for c in casos_90d:
         zona = zona_de_caso(c.get("departamento"), c.get("localidad"))
-        tipo = c.get("tipo_proceso") or "OTRO"
+        tipo_crudo = c.get("tipo_proceso")
+        # Normaliza cualquier valor que no sea uno de los 4 tipos vigentes
+        # (ej. datos viejos con nombres legacy tipo "SOPORTE") a "OTRO",
+        # en vez de dejar filtrar el string crudo tal cual.
+        tipo = tipo_crudo if tipo_crudo in TIPOS_PROCESO_VALIDOS else "OTRO"
         por_zona[zona][tipo] += 1
 
     tecnicos_por_zona = defaultdict(int)
